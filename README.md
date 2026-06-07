@@ -4,7 +4,7 @@ README supplemental Code for:
 "Least Squares Monte Carlo Guided Portfolio Optimization
 under Dynamic Risk Sensitivity"
 Author: Ethan Baratz, West Chester University
-Project Advisors: Dr. Chaun Li and Dr Jiatian Xu
+Project Advisors: Dr. Chuan Li and Dr Jiatian Xu
 Submitted to SIAM Undergraduate Research Online (SIURO)
 
 ============================================================
@@ -80,6 +80,7 @@ All other parameters match the paper:
     initial_wealth = 1000.0
     rho_disc       = 0.04   (discount rate)
     M              = 500    (Monte Carlo paths)
+	r_f            = 0.0425 (risk-free rate: hardcoded constant)
 
 ============================================================
 RUNNING THE CODE
@@ -90,11 +91,11 @@ From a terminal:
 The code will prompt for no input. All parameters are
 hardcoded in main() as described above.
 
-Expected runtime per walk-forward window: approximately
+Expected runtime for walk-forward test: approximately
 10 to 30 minutes depending on hardware, due to GARCH
 estimation and Monte Carlo simulation at each rebalancing
-step. The crisis validation test runs seven windows and
-will take a slightly shorter amount of time.
+step. The crisis validation test runs less windows
+(seven) and will take a slightly shorter amount of time.
 
 ============================================================
 OUTPUT
@@ -107,6 +108,19 @@ paper's figures 1 through 4.
 Snapshot outputs at months t=0, t=29, and t=59 are
 printed for LSMC, MV, and HMM strategies to allow
 progress monitoring during long runs.
+
+============================================================
+DATA AND TICKERS
+============================================================
+All price data downloaded via yfinance at runtime.
+No local data files are included or required.
+
+Universe 1 (Table 1):  VTI, QQQ, TLT, GLD
+Universe 2 (Tables 2-4): MSFT, AAPL, JPM, WMT, PG,
+                          XOM, ORCL, VUSTX, SU
+Universe 3 (Table 5):  Universe 2 plus NEM, PFE, GE, BAC, T
+
+S&P 500 benchmark: SPY (post-1993) or ^GSPC (pre-1993)
 
 ============================================================
 NOTES ON REPRODUCIBILITY
