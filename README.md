@@ -20,17 +20,17 @@ REQUIREMENTS
 ============================================================
 
 Required packages:
-    yfinance
-    numpy
-    pandas
-    cvxpy
-    scikit-learn
-    arch
-    scipy
-    matplotlib
-    seaborn
-    hmmlearn
-    statsmodels
+    yfinance==0.2.58
+    numpy==2.1.3
+    pandas==2.2.3
+    cvxpy==1.7.2
+    scikit-learn==1.6.1
+    arch==8.0.0
+    scipy==1.15.3
+    matplotlib==3.10.3
+    seaborn==0.13.2
+    hmmlearn==0.3.3
+    statsmodels==0.14.4
 
 Install all dependencies with:
     pip install yfinance numpy pandas cvxpy scikit-learn arch
