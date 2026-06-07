@@ -7,17 +7,15 @@ Author: Ethan Baratz, West Chester University
 Project Advisors: Dr. Chuan Li and Dr Jiatian Xu
 Submitted to SIAM Undergraduate Research Online (SIURO)
 
-============================================================
-OVERVIEW
-============================================================
+OVERVIEW:
+
 This file contains the Python implementation used to produce
 all numerical results in the paper. The code runs the LSMC
 portfolio strategy and six benchmark strategies across
 user-selected asset universes and testing regimes.
 
-============================================================
-REQUIREMENTS
-============================================================
+
+REQUIREMENTS:
 
 Required packages:
     yfinance==0.2.58
@@ -37,9 +35,9 @@ Install all dependencies with:
     pip install yfinance numpy pandas cvxpy scikit-learn arch
                 scipy matplotlib seaborn hmmlearn statsmodels
 
-============================================================
-HOW TO REPRODUCE PAPER RESULTS
-============================================================
+
+HOW TO REPRODUCE PAPER RESULTS:
+
 All parameters are set at the top of the main() function.
 To reproduce a specific table, change two variables:
 
@@ -82,9 +80,9 @@ All other parameters match the paper:
     M              = 500    (Monte Carlo paths)
 	r_f            = 0.0425 (risk-free rate: hardcoded constant)
 
-============================================================
-RUNNING THE CODE
-============================================================
+
+RUNNING THE CODE:
+
 From a terminal:
     python portfolio_lsmc.py
 
@@ -97,9 +95,9 @@ estimation and Monte Carlo simulation at each rebalancing
 step. The crisis validation test runs less windows
 (seven) and will take a slightly shorter amount of time.
 
-============================================================
-OUTPUT
-============================================================
+
+OUTPUT:
+
 The code prints performance statistics to the terminal
 for each strategy (Mean Wealth, Sharpe ratio, VaR, ES,
 Max Drawdown) and produces four figures matching the
@@ -109,9 +107,9 @@ Snapshot outputs at months t=0, t=29, and t=59 are
 printed for LSMC, MV, and HMM strategies to allow
 progress monitoring during long runs.
 
-============================================================
-DATA AND TICKERS
-============================================================
+
+DATA AND TICKERS:
+
 All price data downloaded via yfinance at runtime.
 No local data files are included or required.
 
@@ -122,9 +120,9 @@ Universe 3 (Table 5):  Universe 2 plus NEM, PFE, GE, BAC, T
 
 S&P 500 benchmark: SPY (post-1993) or ^GSPC (pre-1993)
 
-============================================================
-NOTES ON REPRODUCIBILITY
-============================================================
+
+NOTES ON REPRODUCIBILITY:
+
 Random seeds are fixed (numpy.random.seed(1) and
 random.seed(1)) inside MCsimMulti() and backtest_policy().
 Results should be reproducible on the same machine 
@@ -142,8 +140,8 @@ slightly from the paper if Yahoo Finance revises
 historical data or if the code is run significantly
 after the paper's submission date.
 
-============================================================
-FILE
-============================================================
+
+FILE:
+
 CodeBase.py   Main implementation file containing
                     all functions and the main() entry point.
