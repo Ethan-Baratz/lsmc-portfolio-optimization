@@ -31,6 +31,7 @@ Required packages:
     seaborn==0.13.2
     hmmlearn==0.3.3
     statsmodels==0.14.4
+	Python==3.11.9
 
 Install all dependencies with:
     pip install yfinance numpy pandas cvxpy scikit-learn arch
