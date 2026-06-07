@@ -113,8 +113,8 @@ NOTES ON REPRODUCIBILITY
 ============================================================
 Random seeds are fixed (numpy.random.seed(1) and
 random.seed(1)) inside MCsimMulti() and backtest_policy().
-Results should be consistent across runs on the same
-machine and Python version.
+Results should be reproducible on the same machine 
+and Python version.
 
 Small numerical differences may occur across different
 operating systems or package versions due to differences
