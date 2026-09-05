@@ -17,6 +17,8 @@ import logging
 import warnings
 from arch.utility.exceptions import ConvergenceWarning
 from scipy.optimize import OptimizeWarning
+from scipy.stats import norm
+import math
 
 logging.getLogger("hmmlearn").setLevel(logging.ERROR)
 
@@ -505,7 +507,7 @@ def MCsimMulti(initial_wealth, r_annual, num_stocks, gamma, rho, train_data = No
 
     # Note if want to change to longer time_steps, would make 240 and rebalance_interval_steps_forward = 2
     #time_steps = 120 # changed from 200 to 120 since 10 * 12 = 120, dt = 10 / 120 = 1/12 = 1 month per step
-    simulations = 500
+    simulations = 5000
 
     c_star = .03 # Constant consumption to start with
 
@@ -705,7 +707,7 @@ def MCsimMulti(initial_wealth, r_annual, num_stocks, gamma, rho, train_data = No
         sim = len(W_t) # need to broadcast scalars here
 
         W_t = np.clip(W_t, 1, 1e10)  # avoid zero/negative issues
-        log_W_t = np.log(np.clip(W_t,1e-6,1e10) / initial_wealth)
+        log_W_t = np.log(np.clip(W_t,1e-10,1e10) / initial_wealth)
 
         pi_star_tm = np.nan_to_num(pi_star_tm, nan=0.0) # clears NaNs
 
@@ -755,12 +757,9 @@ def MCsimMulti(initial_wealth, r_annual, num_stocks, gamma, rho, train_data = No
             np.full(sim, t / time_steps), # works (and works at t=0)
             recent_wealth_change, # works
             cum_vol, # works
-            past_shock_signal,
             max_dd, # works
             exp_smooth_wealth # works
         ])
-
-        L = np.column_stack([L, np.random.normal(0, 0.01 * np.std(log_W_t), size=sim)]) # works
 
         # Assign zero-variance to be equal to 0
         # get std. of all columns (axis=0)
@@ -946,6 +945,7 @@ def MCsimMulti(initial_wealth, r_annual, num_stocks, gamma, rho, train_data = No
               penalty_final = penalty_base * phi_multiplier # multiplying allows us to amplify or cancel each other out
               penalty_final = np.clip(penalty_final, 1.0, 20.0) # ORIGINAL VALUE
               
+              
               c_min, c_max = .01, .06
               # clip consumption to be at max "twice as rich" even if you might be 100x richer than median
               # if you are broke, we treat you as "half as rich"
@@ -1066,22 +1066,6 @@ def MCsimMulti(initial_wealth, r_annual, num_stocks, gamma, rho, train_data = No
     print(f"Final Std Dev: ${std_wealth:,.2f}")
 
 
-    # Sharpe ratio
-
-    # formula for Sharpe is S = (E(R_p) - R_f) / sigma_p
-    # Sharpe treats all volatility as risk. If portfolio jumps up 20%, sharpe penalizes you as much if it jumped down 20%
-
-
-    # Annual Sharpe:
-    annual_returns = (W_tilde[-1, :] / initial_wealth)**(1 / T) - 1
-    excess_annual = annual_returns - r_annual
-    sharpe_annual = (
-      excess_annual.mean() / excess_annual.std()
-      if excess_annual.std() > 0 else 0.0
-    )
-
-    print(f"Sharpe Ratio (annualized) after backward loop: {sharpe_annual:.3f}")
-
     # Value at Risk (5%) and Expected Shortfall (Conditional VaR)
     VaR_5 = np.percentile(W_tilde[-1, :], 5)
     ES_5 = np.mean(W_tilde[-1, W_tilde[-1, :] <= VaR_5]) # boolean indexing - only picks simulation where outcoe was in worst 5%
@@ -1131,7 +1115,7 @@ def backtest_policy(initial_wealth, test_returns_df, policy_brain, r_annual, num
 
 
     for t in range(60):
-        # STEP 1: NEED TO REPLICATE THE 11-FEATURE STATE VECTOR (L)
+        # STEP 1: NEED TO REPLICATE THE 9-FEATURE STATE VECTOR (L)
         W_t = current_wealth
         log_W_t = np.log(np.maximum(W_t / initial_wealth, 1e-10))
 
@@ -1154,28 +1138,25 @@ def backtest_policy(initial_wealth, test_returns_df, policy_brain, r_annual, num
         else:
             feat_7 = 0.0
 
-        # Feature 8: past_shock_signal (Training used Z mean, backtest uses 0)
-        feat_8 = 0.0 # not observable during out of sample training
-
-        # Feature 9: max_dd (Maximum Drawdown of log wealth)
+        # Feature 8: max_dd (Maximum Drawdown of log wealth)
         log_W_history_arr = np.array(log_W_history)
         running_peak = np.maximum.accumulate(log_W_history_arr)
         drawdown_series = running_peak - log_W_history_arr
-        feat_9 = np.max(drawdown_series) # The worst drop experienced so far
+        feat_8 = np.max(drawdown_series) # The worst drop experienced so far
 
-        # Feature 10: exp_smooth_wealth (EMA)
+        # Feature 9: exp_smooth_wealth (EMA)
         alpha_ema = 0.3
         ema_W = 0.0
         for k in range(min(5, len(log_W_history))):
             ema_W += (alpha_ema * (1-alpha_ema)**k) * log_W_history[-(k+1)]
-        feat_10 = ema_W
+        feat_9 = ema_W
 
-        # Construct the 11-feature vector (Matches your L exactly)
+        # Construct the 9-feature vector (Matches your L exactly)
         state = np.array([
             log_W_t, log_W_t**2, log_W_t**3, # 0, 1, 2
             feat_4, feat_5, feat_6,          # 3, 4, 5
-            feat_7, feat_8, feat_9,          # 6, 7, 8
-            feat_10, 0.0                     # 9, 10 (10 is noise=0)
+            feat_7, feat_8,          # 6, 7, 8
+            feat_9                     # 9
         ]).reshape(1, -1)
 
         # STEP 2: CONSULT THE POLICY (BIN LOGIC)
@@ -1257,9 +1238,13 @@ def backtest_policy(initial_wealth, test_returns_df, policy_brain, r_annual, num
         limit = min(end_idx + days_per_step, len(test_returns_df))
         actual_returns = test_returns_df.iloc[end_idx : limit]
 
-        daily_port_ret = actual_returns.values @ new_weights
-        portfolio_return = daily_port_ret.sum()
-        current_wealth *= np.exp(portfolio_return)
+        #daily_port_ret = actual_returns.values @ new_weights
+        #portfolio_return = daily_port_ret.sum()
+        #current_wealth *= np.exp(portfolio_return)
+        
+        simple_returns = np.exp(actual_returns.values) - 1 # shape: (days, n_stocks)
+        daily_port_ret = simple_returns @ new_weights # shape (days, )
+        current_wealth *= np.prod(1 + daily_port_ret) 
 
 
         # Update path history for the next month's features
@@ -1311,29 +1296,58 @@ def backtest_policy_CPPI(initial_wealth, test_returns_df, r_annual, num_stocks):
         end_idx = window + (t * days_per_step)
         actual_returns = test_returns_df.iloc[end_idx : min(end_idx + days_per_step, len(test_returns_df))]
 
+        
+        
         # Risky Part (Equal weight portfolio)
-        risky_ret = (actual_returns.values @ eq_weights).sum()
+        #risky_ret = (actual_returns.values @ eq_weights).sum()
         # Safe Part (Risk free rate)
-        safe_ret = np.log(1 + r_annual * (1/12))
+        #safe_ret = np.log(1 + r_annual * (1/12))
 
-        total_ret = (risky_weight * risky_ret) + (safe_weight * safe_ret)
+        #total_ret = (risky_weight * risky_ret) + (safe_weight * safe_ret)
 
         # transaction costs:
+        #turnover = abs(risky_weight - prev_risky_weight)  # scalar since CPPI has 1 risky bucket
+        #current_wealth *= (1 - turnover * kappa)
+
+        #prev_risky_weight = risky_weight
+
+        #current_wealth -= (current_wealth * 0.03 * (1/12)) # Consumption
+        #current_wealth *= np.exp(total_ret)
+        
+        # transaction costs:
         turnover = abs(risky_weight - prev_risky_weight)  # scalar since CPPI has 1 risky bucket
+        
+        simple_returns = np.exp(actual_returns.values) - 1
+
+        daily_risky_ret = simple_returns @ eq_weights
+
+        #daily_safe_ret = np.full(len(daily_risky_ret), r_annual / 252)
+        
+        daily_safe_ret = np.full(len(daily_risky_ret), np.exp(np.log(1 + r_annual) / 252) - 1)
+
+        daily_total_ret = (risky_weight * daily_risky_ret+safe_weight * daily_safe_ret)
+        month_growth = np.prod(1 + daily_total_ret)
+
         current_wealth *= (1 - turnover * kappa)
 
-        prev_risky_weight = risky_weight
+        current_wealth -= current_wealth * 0.03 * (1/12)
 
-        current_wealth -= (current_wealth * 0.03 * (1/12)) # Consumption
-        current_wealth *= np.exp(total_ret)
+        current_wealth *= month_growth
+        
+        
         wealth_history.append(current_wealth)
 
     return current_wealth, wealth_history, consumption_history
 
 
 def get_HRP_weights(returns_window):
-    cov = returns_window.cov().values
-    corr = returns_window.corr().values
+    
+    lw = LedoitWolf().fit(returns_window.values)
+    cov = lw.covariance_
+    std = np.sqrt(np.diag(cov))
+    corr = cov / np.outer(std, std)
+
+    corr = np.clip(corr, -1, 1)
 
     # 1. Clustering
     d_mat = np.sqrt(np.clip(0.5 * (1 - corr), 0, 1))
@@ -1395,6 +1409,83 @@ def get_HRP_weights(returns_window):
 
 
 
+def deflated_sharpe_ratio(sharpe_observed, returns, n_trials, candidate_sharpes):
+    """
+    Deflated Sharpe Ratio following Bailey and Lopez de Prado (2014).
+
+    Corrects the observed Sharpe ratio for the number of independent
+    strategy configurations evaluated before selecting the final model.
+
+    NOTE on n_trials: this should reflect the number of meaningfully
+    different strategy variants tested, NOT the number of evaluation
+    environments (universes, crisis windows). Testing one strategy on
+    three universes is one strategy, not three. n_trials counts how many
+    distinct parameter configurations or model architectures were tried
+    before arriving at the reported result.
+
+    Parameters
+    ----------
+    sharpe_observed : float
+        Observed annualized Sharpe ratio.
+    returns : np.array
+        Monthly excess returns (after subtracting risk-free rate).
+    n_trials : int
+        Number of independent strategy variants evaluated.
+
+    Returns
+    -------
+    dsr : float
+        Probability that the true Sharpe > 0 after selection correction.
+    sr_benchmark_annual : float
+        Expected maximum Sharpe under the null given n_trials.
+    """
+    from scipy import stats as scipy_stats
+
+    T = len(returns) # sample length
+
+    # Work in monthly scale to match the return observations
+    sr_monthly = sharpe_observed / np.sqrt(12)
+
+    # Higher moments of monthly returns
+    gamma_3 = scipy_stats.skew(returns)
+    gamma_4 = scipy_stats.kurtosis(returns, fisher=False)  # kurtosis
+    
+    
+    var_sr = (1- gamma_3 * sr_monthly+ ((gamma_4 -1) / 4) * sr_monthly**2) / (T - 1)
+    
+    var_sr = max(var_sr, 1e-12)
+    
+    candidate_monthly = np.array(candidate_sharpes) / np.sqrt(12)
+    
+    var_trials = np.var(candidate_monthly, ddof=1)
+    
+    # Expected maximum Sharpe under null
+    if n_trials <= 1:
+        sr_benchmark = 0.0
+        
+    else:
+
+        # Expected maximum Sharpe under null across n_trials independent tests
+        # Bailey & Lopez de Prado (2014) eq. 8
+        euler_mascheroni = 0.5772156649
+        z1 = norm.ppf(1 - 1/n_trials)
+        z2 = norm.ppf(1 - 1/(n_trials*np.e))
+
+        sr_benchmark = (
+            (1-euler_mascheroni)*z1 +euler_mascheroni*z2) * np.sqrt(var_trials)
+
+
+    z_score = (
+        sr_monthly - sr_benchmark
+    ) / np.sqrt(var_sr)
+
+
+    dsr = norm.cdf(z_score)
+
+
+    return dsr, sr_benchmark*np.sqrt(12)
+
+
 def calculate_backtest_stats(final_wealths, histories, consumption_histories, initial_wealth, r_annual, label):
     final_wealths = np.array(final_wealths)
     histories = np.array(histories)
@@ -1412,22 +1503,118 @@ def calculate_backtest_stats(final_wealths, histories, consumption_histories, in
     print(f"Std Dev of Wealth: ${np.std(final_wealths):,.2f}")
 
     # Sharpe (Calculating monthly returns from all test windows)
-    all_monthly_returns = []
-    for path in histories:
+    #all_monthly_returns = []
+    #for path in histories:
         # path is a list of 13 wealth points (Month 0 to Month 12)
-        returns = np.diff(path) / path[:-1]
-        all_monthly_returns.extend(returns)
+        #returns = np.diff(path) / path[:-1]
+        #all_monthly_returns.extend(returns)
 
 
-    all_monthly_returns = np.array(all_monthly_returns)
-    rf_monthly = (1 + r_annual)**(1/12) - 1
-    excess_returns = all_monthly_returns - rf_monthly
+    #all_monthly_returns = np.array(all_monthly_returns)
+    #rf_monthly = (1 + r_annual)**(1/12) - 1
+    #excess_returns = all_monthly_returns - rf_monthly
 
 
     # Sharpe
-    sharpe = (np.mean(excess_returns) / np.std(excess_returns)) * np.sqrt(12)
+    #sharpe = (np.mean(excess_returns) / np.std(excess_returns)) * np.sqrt(12)
 
-    print(f"Backtest Sharpe Ratio: {sharpe:.3f}")
+    #print(f"Backtest Sharpe Ratio: {sharpe:.3f}")
+    
+    
+    
+    
+    rf_monthly = (1 + r_annual)**(1/12) - 1
+
+
+    # ---------------------------------------------------------------
+    # Primary Sharpe estimate:
+    # Compute Sharpe from the expected wealth trajectory.
+    # This avoids treating Monte Carlo replications as independent
+    # observations for inference.
+    # ---------------------------------------------------------------
+
+    mean_path = np.mean(histories, axis=0)
+
+    mean_returns = np.diff(mean_path) / mean_path[:-1]
+
+    mean_excess = mean_returns - rf_monthly
+
+
+    sharpe_primary = (np.mean(mean_excess)/np.std(mean_excess, ddof=1)) * np.sqrt(12)
+
+
+
+    # ---------------------------------------------------------------
+    # Reference: stacked MC Sharpe
+    # ---------------------------------------------------------------
+
+    all_monthly_returns = []
+
+    for path in histories:
+
+        returns = np.diff(path) / path[:-1]
+
+        all_monthly_returns.extend(returns - rf_monthly)
+
+
+    all_monthly_returns = np.array(all_monthly_returns)
+
+
+    sharpe_stacked = (np.mean(all_monthly_returns)/np.std(all_monthly_returns, ddof=1)) * np.sqrt(12)
+
+
+
+    print("\nSharpe Ratio:")
+    print(f"  Primary Sharpe (mean wealth trajectory): {sharpe_primary:.3f}")
+    print(f"  Effective monthly observations: {len(mean_excess)}")
+
+    print(f"  Stacked MC Sharpe (reference only):     {sharpe_stacked:.3f}")
+    print(f"  Stacked observations:                   {len(all_monthly_returns)}")
+
+    print("  NOTE: stacked MC paths are descriptive only")
+    print("  because paths share the same simulation parameters.")
+    
+    
+    
+    # baseline sharpe for LSMC: 1.009
+    # lambda_b = 1.5 sharpe: 0.968
+    # lambda_b = 4.0 sharpe: 1.103
+    # Lambda_V = -1.0 sharpe: 0.995
+    # Lambda_V = -2.0 sharpe:  1.016
+    # Lambda [1,10] sharpe: 1.002
+    # Lambda [1,30] sharpe:  1.034
+    
+    candidate_sharpes = np.array([
+        1.009,
+        0.968,
+        1.103,
+        0.995,
+        1.016,
+        1.002,
+        1.034
+    ])
+
+    n_trials = len(candidate_sharpes)
+    
+    dsr, sr_benchmark = deflated_sharpe_ratio(sharpe_primary, mean_excess, n_trials, candidate_sharpes)
+
+    print(f"\nDeflated Sharpe Ratio (DSR):")
+    print(f"  n_trials used:                  {n_trials}")
+    print(f"  NOTE: n_trials counts distinct parameter configurations,")
+    print(f"  not evaluation environments (universes / crisis windows).")
+    print(f"  Expected max Sharpe under null: {sr_benchmark:.3f}")
+    print(f"  DSR:                            {dsr:.4f}")
+    print(f"  Interpretation: {dsr*100:.1f}% probability that the observed Sharpe exceeds the")
+    print(f"  selection-adjusted benchmark Sharpe after accounting for {n_trials} trials.")
+
+    if dsr > 0.95:
+        print("  DSR > 0.95: Strong evidence of genuine outperformance")
+    elif dsr > 0.75:
+        print("  DSR 0.75-0.95: Moderate confidence after selection correction")
+    else:
+        print("  DSR < 0.75: Result may be partly explained by selection")
+    
+    
 
     VaR_5 = np.percentile(final_wealths, 5)
 
@@ -1519,7 +1706,15 @@ def backtest_policy_RS_MV(initial_wealth, test_returns_df, r_annual, num_stocks,
         current_wealth *= (1 - np.sum(np.abs(new_weights - current_weights)) * kappa)
         current_wealth -= (current_wealth * c_star_constant * (1 / 12))
         actual_returns  = test_returns_df.iloc[end_idx : min(end_idx + days_per_step, len(test_returns_df))]
-        current_wealth *= np.exp((actual_returns.values @ new_weights).sum())
+        #current_wealth *= np.exp((actual_returns.values @ new_weights).sum())
+        
+        simple_returns = np.exp(actual_returns.values) - 1
+
+        daily_port_ret = simple_returns @ new_weights
+
+        month_growth = np.prod(1 + daily_port_ret)
+
+        current_wealth *= month_growth
 
         current_weights = new_weights
         wealth_history.append(current_wealth)
@@ -1606,10 +1801,19 @@ def walk_forward_master2(tickers, r_annual, num_stocks, gamma, rho, initial_weal
             # Same math as the other backtesters
             end_idx = window + (m * 21)
             limit = min(end_idx + 21, len(test_slice))
-            month_ret = np.exp((test_slice.iloc[end_idx : limit].values @ eq_weights).sum())
-            current_w_ew -= current_w_ew * 0.03 * (1/12) # Subtract consumption
-            current_w_ew *= month_ret
+            #month_ret = np.exp((test_slice.iloc[end_idx : limit].values @ eq_weights).sum())
+            #current_w_ew -= current_w_ew * 0.03 * (1/12) # Subtract consumption
+            #current_w_ew *= month_ret
+            #h_ew.append(current_w_ew)
+            
+            actual_returns = test_slice.iloc[end_idx:limit]
+            simple_returns = np.exp(actual_returns.values) - 1
+            daily_port_ret = simple_returns @ eq_weights
+            month_growth = np.prod(1 + daily_port_ret)
+            current_w_ew -= current_w_ew * 0.03 * (1/12)
+            current_w_ew *= month_growth
             h_ew.append(current_w_ew)
+            
 
         ew_w_list.append(current_w_ew); ew_h_list.append(h_ew); ew_c_list.append(c_ew)
 
@@ -1619,10 +1823,21 @@ def walk_forward_master2(tickers, r_annual, num_stocks, gamma, rho, initial_weal
         for m in range(60):
             end_idx = window + (m * 21)
             limit = min(end_idx + 21, len(test_slice))
-            m_ret = np.exp((test_slice.iloc[end_idx : limit].values @ init_weights).sum())
-            w_bh -= (w_bh * 0.03 * (1/12)) # Static consumption
-            w_bh *= m_ret
+            #m_ret = np.exp((test_slice.iloc[end_idx : limit].values @ init_weights).sum())
+            #w_bh -= (w_bh * 0.03 * (1/12)) # Static consumption
+            #w_bh *= m_ret
+            #h_bh.append(w_bh)
+            
+            actual_returns = test_slice.iloc[end_idx:limit]
+            simple_returns = np.exp(actual_returns.values) - 1
+            daily_port_ret = simple_returns @ init_weights
+            month_growth = np.prod(1 + daily_port_ret)
+            w_bh -= w_bh * 0.03 * (1/12)
+            w_bh *= month_growth
+            
             h_bh.append(w_bh)
+            
+            
         b_w.append(w_bh); b_h.append(h_bh); b_c.append(c_bh)
 
 
@@ -1652,17 +1867,23 @@ def walk_forward_master2(tickers, r_annual, num_stocks, gamma, rho, initial_weal
         h_spy = [initial_wealth]
 
         for m in range(60):
-          end_idx = window + (m * 21)
+            end_idx = window + (m * 21)
 
-          if end_idx >=len(spy_m_rets):
-            break
+            if end_idx >=len(spy_m_rets):
+                break
 
-          limit = min(end_idx + 21, len(spy_m_rets))
-          r = spy_m_rets[end_idx:limit].sum()
-          current_w_spy -= current_w_spy * 0.03 * (1/12)
-          current_w_spy *= np.exp(r)
-
-          h_spy.append(current_w_spy)
+            limit = min(end_idx + 21, len(spy_m_rets))
+          #r = spy_m_rets[end_idx:limit].sum()
+          #current_w_spy -= current_w_spy * 0.03 * (1/12)
+          #current_w_spy *= np.exp(r)
+          
+          
+            log_returns = spy_m_rets[end_idx:limit]
+            simple_returns = np.exp(log_returns) - 1
+            month_growth = np.prod(1 + simple_returns)
+            current_w_spy -= current_w_spy * 0.03 * (1/12)
+            current_w_spy *= month_growth
+            h_spy.append(current_w_spy)
 
 
         spy_w_list.append(current_w_spy)
@@ -1682,11 +1903,29 @@ def walk_forward_master2(tickers, r_annual, num_stocks, gamma, rho, initial_weal
             # --- HRP ---
             w_hrp = get_HRP_weights(hist_window)
 
-            turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp)) # transaction costs
-            curr_w_hrp *= (1 - turnover_hrp * kappa)
-            curr_w_hrp -= curr_w_hrp * 0.03 * (1/12) # Consumption
-            curr_w_hrp *= np.exp((actual_m_rets.values @ w_hrp).sum())
+            #turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp)) # transaction costs
+            #curr_w_hrp *= (1 - turnover_hrp * kappa)
+            #curr_w_hrp -= curr_w_hrp * 0.03 * (1/12) # Consumption
+            #curr_w_hrp *= np.exp((actual_m_rets.values @ w_hrp).sum())
 
+            #prev_w_hrp = w_hrp
+            #h_hrp.append(curr_w_hrp)
+            
+            
+            turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp))
+
+            curr_w_hrp *= (1 - turnover_hrp * kappa)
+
+            curr_w_hrp -= curr_w_hrp * 0.03 * (1/12)
+
+            simple_returns = np.exp(actual_m_rets.values) - 1
+
+            daily_port_ret = simple_returns @ w_hrp
+
+            month_growth = np.prod(1 + daily_port_ret)
+
+            curr_w_hrp *= month_growth
+            
             prev_w_hrp = w_hrp
             h_hrp.append(curr_w_hrp)
 
@@ -1760,7 +1999,15 @@ def backtest_policy_MV(initial_wealth, test_returns_df, r_annual, num_stocks, ga
         current_wealth *= (1 - np.sum(np.abs(new_weights - current_weights)) * kappa)
         current_wealth -= (current_wealth * c_star_constant * (1/12))
         actual_returns = test_returns_df.iloc[end_idx : min(end_idx + days_per_step, len(test_returns_df))]
-        current_wealth *= np.exp((actual_returns.values @ new_weights).sum())
+        #current_wealth *= np.exp((actual_returns.values @ new_weights).sum())
+        
+        simple_returns = np.exp(actual_returns.values) - 1
+
+        daily_port_ret = simple_returns @ new_weights
+
+        month_growth = np.prod(1 + daily_port_ret)
+
+        current_wealth *= month_growth
 
         current_weights = new_weights
         wealth_history.append(current_wealth)
@@ -1850,9 +2097,23 @@ def crisis_validation_master(tickers, r_annual, num_stocks, gamma, rho, initial_
         for m in range(60):
             end_idx = window + (m * 21)
             limit = min(end_idx + 21, len(test_slice))
-            month_ret = np.exp((test_slice.iloc[end_idx : limit].values @ eq_weights).sum())
+            #month_ret = np.exp((test_slice.iloc[end_idx : limit].values @ eq_weights).sum())
+            #current_w_ew -= current_w_ew * 0.03 * (1/12)
+            #current_w_ew *= month_ret
+            #h_ew.append(current_w_ew)
+            
+        
+            actual_returns = test_slice.iloc[end_idx:limit]
+
+            simple_returns = np.exp(actual_returns.values) - 1
+            
+            daily_port_ret = simple_returns @ eq_weights
+            month_growth = np.prod(1 + daily_port_ret)
+            
             current_w_ew -= current_w_ew * 0.03 * (1/12)
-            current_w_ew *= month_ret
+            
+            current_w_ew *= month_growth
+            
             h_ew.append(current_w_ew)
 
         ew_w_list.append(current_w_ew); ew_h_list.append(h_ew); ew_c_list.append(c_ew)
@@ -1864,10 +2125,22 @@ def crisis_validation_master(tickers, r_annual, num_stocks, gamma, rho, initial_
         for m in range(60):
             end_idx = window + (m * 21)
             limit = min(end_idx + 21, len(test_slice))
-            m_ret = np.exp((test_slice.iloc[end_idx : limit].values @ init_weights).sum())
-            w_bh -= (w_bh * 0.03 * (1/12)) # Static consumption
-            w_bh *= m_ret
+            #m_ret = np.exp((test_slice.iloc[end_idx : limit].values @ init_weights).sum())
+            #w_bh -= (w_bh * 0.03 * (1/12)) # Static consumption
+            #w_bh *= m_ret
+            #h_bh.append(w_bh)
+            
+            actual_returns = test_slice.iloc[end_idx:limit]
+            simple_returns = np.exp(actual_returns.values) - 1
+            daily_port_ret = simple_returns @ init_weights
+
+            month_growth = np.prod(1 + daily_port_ret)
+            w_bh -= w_bh * 0.03 * (1/12)
+            w_bh *= month_growth
+            
             h_bh.append(w_bh)
+            
+            
         b_w.append(w_bh); b_h.append(h_bh); b_c.append(c_bh)
 
         # --- E. CPPI ---
@@ -1892,18 +2165,26 @@ def crisis_validation_master(tickers, r_annual, num_stocks, gamma, rho, initial_
         h_spy = [initial_wealth]
 
         for m in range(60):
-          end_idx = window + (m * 21)
-          if end_idx >=len(spy_m_rets):
-            break
+            end_idx = window + (m * 21)
+            if end_idx >=len(spy_m_rets):
+                break
 
-          limit = min(end_idx + 21, len(spy_m_rets))
+            limit = min(end_idx + 21, len(spy_m_rets))
 
-          r = spy_m_rets[end_idx:limit].sum()
+            #r = spy_m_rets[end_idx:limit].sum()
 
-          current_w_spy -= current_w_spy * 0.03 * (1/12)
-          current_w_spy *= np.exp(r)
+            #current_w_spy -= current_w_spy * 0.03 * (1/12)
+            #current_w_spy *= np.exp(r)
 
-          h_spy.append(current_w_spy)
+            #h_spy.append(current_w_spy)
+          
+            log_returns = spy_m_rets[end_idx:limit]
+            simple_returns = np.exp(log_returns) - 1
+            month_growth = np.prod(1 + simple_returns)
+            current_w_spy -= current_w_spy * 0.03 * (1/12)
+            current_w_spy *= month_growth
+            h_spy.append(current_w_spy)
+          
 
         spy_w_list.append(current_w_spy)
         spy_h_list.append(h_spy)
@@ -1922,10 +2203,24 @@ def crisis_validation_master(tickers, r_annual, num_stocks, gamma, rho, initial_
             # --- HRP ---
             w_hrp = get_HRP_weights(hist_window)
 
-            turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp)) # transaction costs
+            #turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp)) # transaction costs
+            #curr_w_hrp *= (1 - turnover_hrp * kappa)
+            #curr_w_hrp *= (1 - 0.03 * (1/12)) # Consumption
+            #curr_w_hrp *= np.exp((actual_m_rets.values @ w_hrp).sum())
+            #prev_w_hrp = w_hrp
+            #h_hrp.append(curr_w_hrp)
+            
+            
+            turnover_hrp = np.sum(np.abs(w_hrp - prev_w_hrp))
             curr_w_hrp *= (1 - turnover_hrp * kappa)
-            curr_w_hrp *= (1 - 0.03 * (1/12)) # Consumption
-            curr_w_hrp *= np.exp((actual_m_rets.values @ w_hrp).sum())
+
+            curr_w_hrp -= curr_w_hrp * 0.03 * (1/12)
+            simple_returns = np.exp(actual_m_rets.values) - 1
+            daily_port_ret = simple_returns @ w_hrp
+
+            month_growth = np.prod(1 + daily_port_ret)
+            curr_w_hrp *= month_growth
+            
             prev_w_hrp = w_hrp
             h_hrp.append(curr_w_hrp)
 
@@ -1945,19 +2240,115 @@ def crisis_validation_master(tickers, r_annual, num_stocks, gamma, rho, initial_
 
 
 def run_phi_forecasting_test(penalty_list, wealth_history_list):
+    """
+    Tests whether the LSMC penalty has genuine forward-looking predictive
+    power for future adverse outcomes.
 
-    # Per-window drawdowns
-    all_drawdowns = []
-    for h in wealth_history_list:
-        path = np.array(h[1:])
-        peak = np.maximum.accumulate(path)
-        dd = (peak - path) / peak
-        all_drawdowns.extend(dd)
+    Design choices addressing reviewer concerns:
+    - Forward drawdown uses historical peak (not reset at t) to avoid
+      mechanical correlation with contemporaneous drawdown feature.
+    - Primary results use non-overlapping observations (step=h) to satisfy
+      independence assumption of Welch t-test.
+    - Overlapping results reported as higher-power robustness check only.
+    - Thresholds are data-driven (25th/75th percentile) not arbitrary.
+    - Tail loss clips gains to zero so metric is purely downside.
+    - Confidence intervals reported alongside p-values.
+    - Monte Carlo shocks are generated independently across simulation paths using i.i.d. 
+      Gaussian innovations. To reduce serial dependence induced by multi-period horizons, 
+      the primary statistical tests use non-overlapping forecast windows, with overlapping windows reported as a robustness check.
+    """
 
-    drawdowns = np.array(all_drawdowns)
-    penalty_array = np.array(penalty_list)
+    n_windows = len(wealth_history_list)
+    penalties_per_window = 60
 
-    # Per-window returns (59 per window since diff reduces by 1)
+    penalty_windows = []
+    for i in range(n_windows):
+        penalty_windows.append(
+            np.array(penalty_list[i * penalties_per_window :
+                                   i * penalties_per_window + penalties_per_window])
+        )
+
+    # ----------------------------------------------------------------
+    # FORWARD DRAWDOWN
+    # Uses historical peak up to t as reference so future window is
+    # genuinely out-of-sample relative to the penalty signal.
+    # ----------------------------------------------------------------
+    def compute_forward_max_drawdown(wealth_path, t, horizon):
+        path = np.array(wealth_path[1:])
+
+        if t >= len(path) - 1:
+            return np.nan
+
+        future_segment = path[t + 1 : min(t + 1 + horizon, len(path))]
+
+        if len(future_segment) < 1:
+            return np.nan
+
+        historical_peak = np.max(path[:t + 1])
+        future_dd = np.max(
+            (historical_peak - future_segment) / historical_peak
+        )
+        return float(max(future_dd, 0.0))
+
+    # ----------------------------------------------------------------
+    # FORWARD TAIL LOSS
+    # Clips gains to zero so metric is purely a downside measure.
+    # ----------------------------------------------------------------
+    def compute_forward_tail_loss(wealth_path, t, horizon):
+        path = np.array(wealth_path[1:])
+
+        if t >= len(path) - 1:
+            return np.nan
+
+        future_segment = path[t + 1 : min(t + 1 + horizon, len(path))]
+
+        if len(future_segment) < 1:
+            return np.nan
+
+        W_t = path[t]
+        # Clip gains to zero: only count actual losses as positive numbers
+        losses = np.maximum((W_t - future_segment) / W_t, 0.0)
+        n_tail = max(1, int(len(losses) * 0.25))
+        sorted_losses = np.sort(losses)[::-1]
+        return float(np.mean(sorted_losses[:n_tail]))
+
+    horizons = [1, 3, 6, 12]
+
+    # ----------------------------------------------------------------
+    # Collect paired observations
+    # Non-overlapping: step = h (primary, satisfies independence)
+    # Overlapping: step = 1 (robustness, higher power)
+    # ----------------------------------------------------------------
+    results_nonoverlapping = {h: {'penalty': [], 'future_dd': [], 'future_tail': []}
+                               for h in horizons}
+    results_overlapping    = {h: {'penalty': [], 'future_dd': [], 'future_tail': []}
+                               for h in horizons}
+
+    for i, h_list in enumerate(wealth_history_list):
+        pen_w = penalty_windows[i]
+
+        for h in horizons:
+            # Non-overlapping: step = h
+            for t in range(0, penalties_per_window, h):
+                fd = compute_forward_max_drawdown(h_list, t, h)
+                ft = compute_forward_tail_loss(h_list, t, h)
+                if not (np.isnan(fd) or np.isnan(ft)):
+                    results_nonoverlapping[h]['penalty'].append(pen_w[t])
+                    results_nonoverlapping[h]['future_dd'].append(fd)
+                    results_nonoverlapping[h]['future_tail'].append(ft)
+
+            # Overlapping: step = 1
+            for t in range(penalties_per_window):
+                fd = compute_forward_max_drawdown(h_list, t, h)
+                ft = compute_forward_tail_loss(h_list, t, h)
+                if not (np.isnan(fd) or np.isnan(ft)):
+                    results_overlapping[h]['penalty'].append(pen_w[t])
+                    results_overlapping[h]['future_dd'].append(fd)
+                    results_overlapping[h]['future_tail'].append(ft)
+
+    # ----------------------------------------------------------------
+    # Next-period return test
+    # ----------------------------------------------------------------
     all_returns = []
     for h in wealth_history_list:
         path = np.array(h[1:])
@@ -1965,85 +2356,184 @@ def run_phi_forecasting_test(penalty_list, wealth_history_list):
         all_returns.extend(r)
     all_returns = np.array(all_returns)
 
-    # Trim penalty to match returns length (59 per window, not 60)
     all_penalty_trimmed = []
     for i in range(len(wealth_history_list)):
         all_penalty_trimmed.extend(penalty_list[i*60 : i*60 + 59])
     all_penalty_trimmed = np.array(all_penalty_trimmed)
 
-    # Boolean masks for drawdown comparison (uses full 60-per-window penalty)
-    high_penalty_mask = penalty_array > 10
-    low_penalty_mask  = penalty_array < 5
+    ht_trim = np.percentile(all_penalty_trimmed, 75)
+    lt_trim = np.percentile(all_penalty_trimmed, 25)
+    high_idx = np.where(all_penalty_trimmed >= ht_trim)[0]
+    low_idx  = np.where(all_penalty_trimmed <= lt_trim)[0]
 
-    dd_high = drawdowns[high_penalty_mask]
-    dd_low  = drawdowns[low_penalty_mask]
+    # ----------------------------------------------------------------
+    # Helper: t-test block with confidence interval
+    # ----------------------------------------------------------------
+    def run_ttest_block(arr_h, arr_l, metric_name, h, sample_label):
+        if len(arr_h) > 1 and len(arr_l) > 1:
+            mean_h = np.mean(arr_h)
+            mean_l = np.mean(arr_l)
+            diff   = mean_h - mean_l
 
-    # Index arrays for protection test (uses trimmed 59-per-window penalty)
-    high_penalty_idx = np.where(all_penalty_trimmed > 10)[0]
-    low_penalty_idx  = np.where(all_penalty_trimmed < 5)[0]
+            t_s, p_v = stats.ttest_ind(arr_h, arr_l, equal_var=False)
 
-    print("\n" + "="*60)
-    print("DEFENSIVE RESPONSE TEST")
-    print("="*60)
-    print(f"Total months analyzed: {len(penalty_array)}")
-    print(f"High penalty months (>10): {np.sum(high_penalty_mask)}")
-    print(f"Low penalty months (<5):   {np.sum(low_penalty_mask)}")
+            # 95% confidence interval on the difference using Welch approximation
+            se_h = np.std(arr_h, ddof=1) / np.sqrt(len(arr_h))
+            se_l = np.std(arr_l, ddof=1) / np.sqrt(len(arr_l))
+            se_diff = np.sqrt(se_h**2 + se_l**2)
 
-    if len(dd_high) > 0:
-        print(f"\nAverage drawdown when penalty HIGH (>10): {np.mean(dd_high)*100:.2f}%")
-    else:
-        print(f"\nAverage drawdown when penalty HIGH (>10): N/A")
+            # Welch-Satterthwaite degrees of freedom
+            df = (se_h**2 + se_l**2)**2 / (
+                se_h**4 / (len(arr_h) - 1) + se_l**4 / (len(arr_l) - 1)
+            )
+            t_crit = stats.t.ppf(0.975, df)
+            ci_lo = diff - t_crit * se_diff
+            ci_hi = diff + t_crit * se_diff
 
-    if len(dd_low) > 0:
-        print(f"Average drawdown when penalty LOW  (<5):  {np.mean(dd_low)*100:.2f}%")
-    else:
-        print(f"Average drawdown when penalty LOW  (<5):  N/A")
+            print(f"    [{sample_label}]")
+            print(f"      Obs: high={len(arr_h)}, low={len(arr_l)}")
+            print(f"      Avg {metric_name} | HIGH: {mean_h*100:.2f}%")
+            print(f"      Avg {metric_name} | LOW:  {mean_l*100:.2f}%")
+            print(f"      Difference: {diff*100:.2f}%  "
+                  f"95% CI: [{ci_lo*100:.2f}%, {ci_hi*100:.2f}%]")
+            print(f"      Welch t={t_s:.3f}, p={p_v:.4f}")
 
-    if len(dd_high) > 0 and len(dd_low) > 0:
-        print(f"\nDifference: {(np.mean(dd_high) - np.mean(dd_low))*100:.2f}%")
-
-    # T-test
-    if len(dd_high) > 1 and len(dd_low) > 1:
-        t_stat, p_val = stats.ttest_ind(dd_high, dd_low, equal_var=False)
-        print(f"\nT-statistic: {t_stat:.3f}")
-        print(f"P-value:     {p_val:.4f}")
-
-        if p_val < 0.05:
-            print("\n RESULT: Penalty successfully identifies crisis periods!")
-            print("High penalties significantly coincide with drawdowns.")
+            if p_v < 0.05:
+                print(f"      Statistically significant at the 5% level. (p={p_v:.4f})")
+            else:
+                print(f"      Not significant at 5% level (p={p_v:.4f})")
         else:
-            print("\n RESULT: Penalty not significantly associated with drawdowns")
-    else:
-        print("\n WARNING: Insufficient data for t-test")
+            print(f"    [{sample_label}] Insufficient observations")
 
-    # Protection test
-    if len(high_penalty_idx) > 0 and len(low_penalty_idx) > 0:
-        ret_high = all_returns[high_penalty_idx]
-        ret_low  = all_returns[low_penalty_idx]
 
-        print(f"\n--- PROTECTION TEST ---")
-        print(f"Next month return when penalty HIGH: {np.mean(ret_high)*100:.2f}%")
-        print(f"Next month return when penalty LOW: {np.mean(ret_low)*100:.2f}%")
-        print(f"Difference: {(np.mean(ret_high) - np.mean(ret_low))*100:.2f}%")
+    penalty_array = np.array(penalty_list)
+    ht_global = np.percentile(penalty_array, 75)
+    lt_global = np.percentile(penalty_array, 25)
 
-        if np.mean(ret_high) > np.mean(ret_low):
-            print("High penalty periods have BETTER subsequent returns!")
-        else:
-            print("High penalty periods have WORSE subsequent returns")
+    print("\n" + "="*70)
+    print("PENALTY PREDICTIVE VALIDITY TEST")
+    print("="*70)
+    print(f"Total months analyzed:            {len(penalty_array)}")
+    print(f"Windows:                          {n_windows}")
+    print(f"Months per window:                {penalties_per_window}")
+    print(f"High penalty threshold (75th pct): {ht_global:.2f}")
+    print(f"Low  penalty threshold (25th pct): {lt_global:.2f}")
+    print(f"High penalty months:              {np.sum(penalty_array >= ht_global)}")
+    print(f"Low  penalty months:              {np.sum(penalty_array <= lt_global)}")
+    print()
+    print("Thresholds: data-driven 25th/75th percentile (no free parameters).")
+    print("Primary results: non-overlapping subsamples (step=h per horizon)")
+    print("  to satisfy independence assumption of Welch t-test.")
+    print("Robustness: overlapping results also reported for higher power.")
+    print("Independent Gaussian innovations are generated across Monte Carlo")
+    print("simulation paths. Primary inference uses non-overlapping forecast")
+    print("windows to reduce serial dependence; overlapping results are")
+    print("reported as a robustness check.")
 
-        if len(ret_high) > 1 and len(ret_low) > 1:
-          t_stat_ret, p_val_ret = stats.ttest_ind(ret_high, ret_low, equal_var=False)
-          print(f"\nT-statistic for returns: {t_stat_ret:.3f}")
-          print(f"P-value for returns: {p_val_ret:.4f}")
+    # --- B: Forward drawdown ---
+    print("\n" + "-"*70)
+    print("B) FORWARD-LOOKING DRAWDOWN TEST")
+    print("   Does penalty at t predict drawdown over [t+1, t+h]?")
+    print("   Reference: historical peak up to t (not reset at t).")
+    print("   This avoids validating the penalty against the contemporaneous drawdown feature used during training.")
+    print("-"*70)
 
-    # Penalty distribution
-    print(f"\n--- PENALTY DISTRIBUTION ---")
-    print(f"Mean: {np.mean(penalty_array):.2f}")
-    print(f"Median: {np.median(penalty_array):.2f}")
-    print(f"Min: {np.min(penalty_array):.2f}")
-    print(f"Max: {np.max(penalty_array):.2f}")
-    print(f"Std: {np.std(penalty_array):.2f}")
-    print("="*60 + "\n")
+    for h in horizons:
+        print(f"\n  Horizon h={h} month(s) ahead:")
+        run_ttest_block(
+            np.array(results_nonoverlapping[h]['future_dd'])[
+                np.array(results_nonoverlapping[h]['penalty']) >=
+                np.percentile(results_nonoverlapping[h]['penalty'], 75)],
+            np.array(results_nonoverlapping[h]['future_dd'])[
+                np.array(results_nonoverlapping[h]['penalty']) <=
+                np.percentile(results_nonoverlapping[h]['penalty'], 25)],
+            "future drawdown", h, "Non-overlapping PRIMARY"
+        )
+        run_ttest_block(
+            np.array(results_overlapping[h]['future_dd'])[
+                np.array(results_overlapping[h]['penalty']) >=
+                np.percentile(results_overlapping[h]['penalty'], 75)],
+            np.array(results_overlapping[h]['future_dd'])[
+                np.array(results_overlapping[h]['penalty']) <=
+                np.percentile(results_overlapping[h]['penalty'], 25)],
+            "future drawdown", h, "Overlapping robustness"
+        )
+
+    # --- C: Forward tail loss ---
+    print("\n" + "-"*70)
+    print("C) FORWARD-LOOKING TAIL LOSS TEST")
+    print("   Does penalty at t predict worst future monthly losses [t+1, t+h]?")
+    print("   Gains clipped to zero: metric is purely downside.")
+    print("-"*70)
+
+    for h in horizons:
+        print(f"\n  Horizon h={h} month(s) ahead:")
+        run_ttest_block(
+            np.array(results_nonoverlapping[h]['future_tail'])[
+                np.array(results_nonoverlapping[h]['penalty']) >=
+                np.percentile(results_nonoverlapping[h]['penalty'], 75)],
+            np.array(results_nonoverlapping[h]['future_tail'])[
+                np.array(results_nonoverlapping[h]['penalty']) <=
+                np.percentile(results_nonoverlapping[h]['penalty'], 25)],
+            "tail loss", h, "Non-overlapping PRIMARY"
+        )
+        run_ttest_block(
+            np.array(results_overlapping[h]['future_tail'])[
+                np.array(results_overlapping[h]['penalty']) >=
+                np.percentile(results_overlapping[h]['penalty'], 75)],
+            np.array(results_overlapping[h]['future_tail'])[
+                np.array(results_overlapping[h]['penalty']) <=
+                np.percentile(results_overlapping[h]['penalty'], 25)],
+            "tail loss", h, "Overlapping robustness"
+        )
+        
+        
+
+    # --- D: Next-period return ---
+    print("\n" + "-"*70)
+    print("D) NEXT-PERIOD RETURN TEST (t+1 only, reference)")
+    print("   Lower returns during high-penalty periods are expected:")
+    print("   the model is intentionally defensive, not return-maximizing.")
+    print("-"*70)
+
+    if len(high_idx) > 0 and len(low_idx) > 0:
+        ret_h = all_returns[high_idx]
+        ret_l = all_returns[low_idx]
+
+        print(f"  High threshold (75th pct): {ht_trim:.2f}")
+        print(f"  Low  threshold (25th pct): {lt_trim:.2f}")
+
+        diff = np.mean(ret_h) - np.mean(ret_l)
+        se_h = np.std(ret_h, ddof=1) / np.sqrt(len(ret_h))
+        se_l = np.std(ret_l, ddof=1) / np.sqrt(len(ret_l))
+        se_diff = np.sqrt(se_h**2 + se_l**2)
+        df = (se_h**2 + se_l**2)**2 / (
+            se_h**4/(len(ret_h)-1) + se_l**4/(len(ret_l)-1))
+        t_crit = stats.t.ppf(0.975, df)
+        ci_lo = diff - t_crit * se_diff
+        ci_hi = diff + t_crit * se_diff
+
+        print(f"  Next month return | HIGH: {np.mean(ret_h)*100:.2f}%")
+        print(f"  Next month return | LOW:  {np.mean(ret_l)*100:.2f}%")
+        print(f"  Difference: {diff*100:.2f}%  "
+              f"95% CI: [{ci_lo*100:.2f}%, {ci_hi*100:.2f}%]")
+
+        if len(ret_h) > 1 and len(ret_l) > 1:
+            t_s, p_v = stats.ttest_ind(ret_h, ret_l, equal_var=False)
+            print(f"  Welch t={t_s:.3f}, p={p_v:.4f}")
+
+    # --- E: Penalty distribution ---
+    print("\n" + "-"*70)
+    print("E) PENALTY DISTRIBUTION")
+    print("-"*70)
+    print(f"  Mean:   {np.mean(penalty_array):.2f}")
+    print(f"  Median: {np.median(penalty_array):.2f}")
+    print(f"  Min:    {np.min(penalty_array):.2f}")
+    print(f"  Max:    {np.max(penalty_array):.2f}")
+    print(f"  Std:    {np.std(penalty_array):.2f}")
+    print("="*70 + "\n")
+
+
 
 
 
@@ -2170,16 +2660,15 @@ def plot_backtest_comparison(all_results, r_annual, tickers, lsmc_weights_histor
     plt.colorbar(im, ax=ax5, label='Portfolio Weight', shrink=0.6)
 
 
-    # ---  ADaptive risk pen (brain) -
-    #ax6 = axes[2, 1]
+    # ---  ADaptive risk pen (brain) - 
     ax6 = axes[1, 1]
     # Penalties are often long, so we average them to match the 60 month timeframe
     penalty_series = np.array(lsmc_penalties)
-    # If the penalty list is from multiple windows, just take the first 60
-    ax6.plot(penalty_series[:60], color='red', linewidth=2, label='Risk Penalty (Lambda)')
-    ax6.fill_between(range(len(penalty_series[:60])), penalty_series[:60], color='red', alpha=0.1)
+    # If the penalty list is from multiple windows, just take the second window 1999-12-28 → 2004-12-3
+    ax6.plot(penalty_series[60:120], color='red', linewidth=2, label='Risk Penalty (Lambda)')
+    ax6.fill_between(range(len(penalty_series[60:120])), penalty_series[60:120], color='red', alpha=0.1)
     ax6.set_title("LSMC Adaptive Risk Penalty", fontsize=14, fontweight='bold')
-    ax6.set_ylabel("Penalty Strength (High = Defensive)")
+    ax6.set_ylabel("Penalty Strength")
     ax6.set_xlabel("Months")
 
 
